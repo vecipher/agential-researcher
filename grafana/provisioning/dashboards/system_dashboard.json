@@ -1,0 +1,190 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Agential Researcher System Dashboard",
+    "tags": ["agential", "researcher", "system"],
+    "style": "dark",
+    "timezone": "utc",
+    "panels": [
+      {
+        "id": 1,
+        "title": "System Health Overview",
+        "type": "stat",
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 6,
+          "h": 4
+        },
+        "targets": [
+          {
+            "expr": "up{job=\"api\"}",
+            "legendFormat": "API Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "red"
+                },
+                {
+                  "value": 1,
+                  "color": "green"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Queue Depths",
+        "type": "graph",
+        "gridPos": {
+          "x": 6,
+          "y": 0,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rabbitmq_queue_messages{queue=\"hot\"}",
+            "legendFormat": "Hot Queue"
+          },
+          {
+            "expr": "rabbitmq_queue_messages{queue=\"backfill\"}",
+            "legendFormat": "Backfill Queue"
+          },
+          {
+            "expr": "rabbitmq_queue_messages{queue=\"vlm_ocr\"}",
+            "legendFormat": "VLM/OCR Queue"
+          },
+          {
+            "expr": "rabbitmq_queue_messages{queue=\"maintenance\"}",
+            "legendFormat": "Maintenance Queue"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Messages",
+            "show": true
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "API Request Rate",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 8,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(http_requests_total[5m])",
+            "legendFormat": "{{method}} {{handler}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests/sec",
+            "show": true
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "vLLM Time to First Token (TTFT)",
+        "type": "graph",
+        "gridPos": {
+          "x": 12,
+          "y": 8,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, rate(vllm_time_to_first_token_seconds_bucket[5m]))",
+            "legendFormat": "P50 TTFT"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(vllm_time_to_first_token_seconds_bucket[5m]))",
+            "legendFormat": "P95 TTFT"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Seconds",
+            "show": true
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Tokens Per Second",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 16,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(vllm_generated_tokens_total[5m])",
+            "legendFormat": "Generated Tokens/sec"
+          },
+          {
+            "expr": "rate(vllm_prompt_tokens_total[5m])",
+            "legendFormat": "Prompt Tokens/sec"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Tokens/sec",
+            "show": true
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "GPU Utilization",
+        "type": "graph",
+        "gridPos": {
+          "x": 12,
+          "y": 16,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "nv_gpu_utilization",
+            "legendFormat": "GPU {{device}} Utilization"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Utilization %",
+            "show": true
+          }
+        ]
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s"
+  },
+  "folder": "",
+  "overwrite": false
+}
