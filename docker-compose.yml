@@ -1,0 +1,269 @@
+version: '3.8'
+
+services:
+  # RabbitMQ for message queuing
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: agential-researcher-rabbitmq
+    ports:
+      - "5672:5672"  # AMQP
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for Celery backend (alternative to RPC)
+  redis:
+    image: redis:7-alpine
+    container_name: agential-researcher-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # vLLM text processing server (7B model)
+  vllm-text:
+    image: vllm/vllm-openai:latest
+    container_name: agential-researcher-vllm-text
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface  # For model caching
+    environment:
+      - MODEL_NAME=meta-llama/Llama-2-7b-chat-hf
+    command: >
+      python -m vllm.entrypoints.openai.api_server
+      --model meta-llama/Llama-2-7b-chat-hf
+      --tensor-parallel-size 1
+    # Commented out for now - needs GPU access
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # depends_on:
+    #   - gpu-check  # Only if GPU is available
+
+  # vLLM VLM/OCR server (separate for resource isolation)
+  vllm-vl:
+    image: vllm/vllm-openai:latest
+    container_name: agential-researcher-vllm-vl
+    ports:
+      - "8001:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - MODEL_NAME=llava-hf/llava-1.5-7b-hf
+    command: >
+      python -m vllm.entrypoints.openai.api_server
+      --model llava-hf/llava-1.5-7b-hf
+      --tensor-parallel-size 1
+    # Commented out for now - needs GPU access
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Ollama for fallback processing
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agential-researcher-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main API server
+  api:
+    build: .
+    container_name: agential-researcher-api
+    ports:
+      - "8080:8000"
+    volumes:
+      - .:/app
+      - sqlite_data:/app/data
+      - lancedb_data:/app/.lancedb
+    environment:
+      - BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - BACKEND_URL=redis://redis:6379/0
+      - VLLM_URL=http://vllm-text:8000
+      - OLLAMA_URL=http://ollama:11434
+      - SQLITE_PATH=/app/data/agential_researcher.db
+      - LANCEDB_PATH=/app/.lancedb
+      - DEBUG=True
+    command: >
+      sh -c "python bootstrap_db.py &&
+             python -m uvicorn src.agential_researcher.api.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # vllm-text:
+      #   condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  # Celery worker for hot queue (high priority)
+  worker-hot:
+    build: .
+    container_name: agential-researcher-worker-hot
+    volumes:
+      - .:/app
+    environment:
+      - BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - BACKEND_URL=redis://redis:6379/0
+      - VLLM_URL=http://vllm-text:8000
+      - OLLAMA_URL=http://ollama:11434
+      - SQLITE_PATH=/app/data/agential_researcher.db
+      - LANCEDB_PATH=/app/.lancedb
+    command: celery -A src.agential_researcher.queue.celery_app worker --loglevel=info --queues=hot
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  # Celery worker for VLM/OCR queue
+  worker-vlm-ocr:
+    build: .
+    container_name: agential-researcher-worker-vlm-ocr
+    volumes:
+      - .:/app
+    environment:
+      - BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - BACKEND_URL=redis://redis:6379/0
+      - VLLM_URL=http://vllm-vl:8000
+      - OLLAMA_URL=http://ollama:11434
+      - SQLITE_PATH=/app/data/agential_researcher.db
+      - LANCEDB_PATH=/app/.lancedb
+    command: celery -A src.agential_researcher.queue.celery_app worker --loglevel=info --queues=vlm_ocr
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # vllm-vl:
+      #   condition: service_healthy
+
+  # Celery worker for backfill queue
+  worker-backfill:
+    build: .
+    container_name: agential-researcher-worker-backfill
+    volumes:
+      - .:/app
+    environment:
+      - BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - BACKEND_URL=redis://redis:6379/0
+      - VLLM_URL=http://vllm-text:8000
+      - OLLAMA_URL=http://ollama:11434
+      - SQLITE_PATH=/app/data/agential_researcher.db
+      - LANCEDB_PATH=/app/.lancedb
+    command: celery -A src.agential_researcher.queue.celery_app worker --loglevel=info --queues=backfill
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agential-researcher-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    depends_on:
+      - api
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: agential-researcher-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+  # arXiv poller service
+  arxiv-poller:
+    build: .
+    container_name: agential-researcher-arxiv-poller
+    volumes:
+      - .:/app
+    environment:
+      - BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - SQLITE_PATH=/app/data/agential_researcher.db
+    command: python -m src.agential_researcher.ingest.arxiv_poller
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+volumes:
+  rabbitmq_data:
+  redis_data:
+  ollama_data:
+  sqlite_data:
+  lancedb_data:
+  prometheus_data:
+  grafana_data:
